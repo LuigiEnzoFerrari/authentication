@@ -1,24 +1,27 @@
 package main
 
 import (
-	"crypto/rand"
-	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
 	"net/http"
 	"time"
-
+	"github.com/golang-jwt/jwt/v5"
 	"golang.org/x/crypto/bcrypt"
 )
 
 type Login struct {
 	HashPassword string
-	SessionToken string
-	CSRFToken    string
 }
 
+var secretKey = []byte("secret-key")
+
 var users = map[string]Login{}
+
+type LoginResponse struct {
+	Token string
+}
 
 func main() {
 
@@ -56,7 +59,18 @@ func register(w http.ResponseWriter, r *http.Request) {
 	}
 
 	users[username] = Login{HashPassword: hashedPassword}
-	fmt.Fprintf(w, "Register: %v", users)
+}
+
+func createToken(username string) string {
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
+		"username": username,
+		"exp": time.Now().Add(time.Hour * 24).Unix(),
+	})
+	tokenString, err := token.SignedString(secretKey)
+	if err != nil {
+		log.Fatal(err)
+	}
+	return tokenString
 }
 
 func login(w http.ResponseWriter, r *http.Request) {
@@ -79,28 +93,25 @@ func login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	sessionToken := generateToken(32)
-	csrfToken := generateToken(32)
+	tokenString := createToken(username)
 
-	http.SetCookie(w, &http.Cookie{
-		Name:     "session_token",
-		Value:    sessionToken,
-		Expires:  time.Now().Add(1 * time.Hour),
-		HttpOnly: true,
-	})
+	response := LoginResponse{Token: tokenString}
+	jsonResponse, err := json.Marshal(response)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
 
-	http.SetCookie(w, &http.Cookie{
-		Name:     "csrf_token",
-		Value:    csrfToken,
-		Expires:  time.Now().Add(1 * time.Hour),
-		HttpOnly: false,
-	})
 
-	user.SessionToken = sessionToken
-	user.CSRFToken = csrfToken
+	w.Header().Set("Content-Type", "application/json")
+
+	w.WriteHeader(http.StatusOK)
+	w.Write(jsonResponse)
+
+
+
 	users[username] = user
 
-	fmt.Fprintf(w, "Login: %v", users)
 }
 
 func protected(w http.ResponseWriter, r *http.Request) {
@@ -108,9 +119,15 @@ func protected(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Login: ", http.StatusMethodNotAllowed)
 		return
 	}
-	if err := authorize(r); err != nil {
+	w.Header().Set("Content-Type", "application/json")
+	tokenString := r.Header.Get("Authorization")
+	if tokenString == "" {
+		http.Error(w, "protected: ", http.StatusUnauthorized)
+		return
+	}
+	tokenString = tokenString[len("Bearer "):]
+	if err := verifyToken(tokenString); err != nil {
 		http.Error(w, "protected:", http.StatusUnauthorized)
-
 		return
 	}
 
@@ -119,56 +136,40 @@ func protected(w http.ResponseWriter, r *http.Request) {
 }
 
 func logout(w http.ResponseWriter, r *http.Request) {
-	if err := authorize(r); err != nil {
+	w.Header().Set("Content-Type", "application/json")
+	tokenString := r.Header.Get("Authorization")
+	if tokenString == "" {
+		http.Error(w, "protected: ", http.StatusUnauthorized)
+		return		
+	}
+	tokenString = tokenString[len("Bearer "):]
+	if err := verifyToken(tokenString); err != nil {
 		http.Error(w, "protected:", http.StatusUnauthorized)
 		return
 	}
 
-	http.SetCookie(w, &http.Cookie{
-		Name:     "session_token",
-		Value:    "",
-		Expires:  time.Now().Add(-time.Hour),
-		HttpOnly: true,
-	})
-
-	http.SetCookie(w, &http.Cookie{
-		Name:     "csrf_token",
-		Value:    "",
-		Expires:  time.Now().Add(-time.Hour),
-		HttpOnly: false,
-	})
 	username := r.FormValue("username")
 	user, _ := users[username]
-	user.SessionToken = ""
-	user.CSRFToken = ""
 	users[username] = user
 
 }
 
 var AuthError = errors.New("Unauthorized")
 
-func authorize(r *http.Request) error {
-	username := r.FormValue("username")
-	user, ok := users[username]
-	if !ok {
-		return AuthError
-	}
-
-	st, err := r.Cookie("session_token")
+func verifyToken(tokenString string) error {
+	token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
+	   return secretKey, nil
+	})
+   
 	if err != nil {
-		return err
+	   return err
 	}
-
-	if user.SessionToken != st.Value {
-		return AuthError
+   
+	if !token.Valid {
+	   return fmt.Errorf("invalid token")
 	}
-
-	csrf := r.Header.Get("X-CSRF-Token")
-	if user.CSRFToken != csrf {
-		return AuthError
-	}
+   
 	return nil
-
 }
 
 func checkPassword(password string, hashedPassword string) bool {
@@ -182,12 +183,4 @@ func hashPassword(password string) (string, error) {
 		return "", err
 	}
 	return string(hashedPassword), nil
-}
-
-func generateToken(length int) string {
-	token := make([]byte, length)
-	if _, err := rand.Read(token); err != nil {
-		log.Fatal(err)
-	}
-	return base64.StdEncoding.EncodeToString(token)
 }
