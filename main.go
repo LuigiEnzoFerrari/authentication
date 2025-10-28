@@ -9,6 +9,7 @@ import (
 	"time"
 	"github.com/golang-jwt/jwt/v5"
 	"golang.org/x/crypto/bcrypt"
+	"io"
 )
 
 type Login struct {
@@ -44,8 +45,28 @@ func register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	username := r.FormValue("username")
-	password := r.FormValue("password")
+	var request struct {
+		Username string `json:"username"`
+		Password string `json:"password"`
+	}
+
+	err := json.NewDecoder(r.Body).Decode(&request)
+	if err != nil {
+		if err == io.EOF {
+			http.Error(w, "Register: Empty request", http.StatusBadRequest)
+			return
+		}
+		http.Error(w, "Register: Error decoding request", http.StatusBadRequest)
+		return
+	}
+
+	username := request.Username
+	password := request.Password
+
+	if username == "" || password == "" {
+		http.Error(w, "Register: Username and password are required", http.StatusBadRequest)
+		return
+	}
 
 	if _, ok := users[username]; ok {
 		http.Error(w, "Register: Username already exists", http.StatusConflict)
