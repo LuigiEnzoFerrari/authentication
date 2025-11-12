@@ -1,30 +1,72 @@
 package main
 
 import (
+	"database/sql"
 	"encoding/json"
-	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
+	"os"
 	"time"
+
 	"github.com/golang-jwt/jwt/v5"
+	_ "github.com/jackc/pgx/v5/stdlib"
 	"golang.org/x/crypto/bcrypt"
-	"io"
 )
 
 type Login struct {
 	HashPassword string
 }
 
-var secretKey = []byte("secret-key")
-
-var users = map[string]Login{}
+var (
+	secretKey []byte
+	connStr   string
+	appPort   string
+)
 
 type LoginResponse struct {
 	Token string
 }
 
+func getenv(key, def string) string {
+	v := os.Getenv(key)
+	if v == "" {
+		return def
+	}
+	return v
+}
+
+func init() {
+	// Load configuration from environment with sensible defaults
+	dbHost := getenv("DB_HOST", "localhost")
+	dbPort := getenv("DB_PORT", "5433")
+	dbUser := getenv("DB_USER", "user")
+	dbPassword := getenv("DB_PASSWORD", "password")
+	dbName := getenv("DB_NAME", "mydb")
+
+	secretKey = []byte(getenv("SECRET_KEY", "secret-key"))
+	appPort = getenv("APP_PORT", "8080")
+
+	connStr = fmt.Sprintf(
+		"host=%s port=%s user=%s password=%s dbname=%s sslmode=disable",
+		dbHost, dbPort, dbUser, dbPassword, dbName,
+	)
+}
+
 func main() {
+
+	db, err := sql.Open("pgx", connStr)
+	if err != nil {
+		log.Fatalf("Unable to open database connection: %v\n", err)
+	}
+
+	err = db.Ping()
+	if err != nil {
+		log.Fatalf("Unable to ping database: %v\n", err)
+	}
+
+	log.Println("Successfully connected to PostgreSQL!")
 
 	fmt.Println("Hello, World!")
 	http.HandleFunc("/", home)
@@ -32,7 +74,7 @@ func main() {
 	http.HandleFunc("/register", register)
 	http.HandleFunc("/logout", logout)
 	http.HandleFunc("/protected", protected)
-	http.ListenAndServe(":8080", nil)
+	http.ListenAndServe(":"+appPort, nil)
 }
 
 func home(w http.ResponseWriter, r *http.Request) {
@@ -40,10 +82,12 @@ func home(w http.ResponseWriter, r *http.Request) {
 }
 
 func register(w http.ResponseWriter, r *http.Request) {
+	db, _ := sql.Open("pgx", connStr)
 	if r.Method != http.MethodPost {
 		http.Error(w, "Register: ", http.StatusMethodNotAllowed)
 		return
 	}
+	defer db.Close()
 
 	var request struct {
 		Username string `json:"username"`
@@ -63,29 +107,28 @@ func register(w http.ResponseWriter, r *http.Request) {
 	username := request.Username
 	password := request.Password
 
-	if username == "" || password == "" {
-		http.Error(w, "Register: Username and password are required", http.StatusBadRequest)
-		return
-	}
-
-	if _, ok := users[username]; ok {
-		http.Error(w, "Register: Username already exists", http.StatusConflict)
-		return
-	}
-
 	hashedPassword, err := hashPassword(password)
 	if err != nil {
 		http.Error(w, "Register: Error hashing password", http.StatusInternalServerError)
 		return
 	}
 
-	users[username] = Login{HashPassword: hashedPassword}
+	query := "INSERT INTO users (username, hash_password) VALUES ($1, $2)"
+	_, err = db.Exec(query, username, hashedPassword)
+	if err != nil {
+		http.Error(w, "Register: Error inserting user", http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte("User registered successfully"))
+
 }
 
 func createToken(username string) string {
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
 		"username": username,
-		"exp": time.Now().Add(time.Hour * 24).Unix(),
+		"exp":      time.Now().Add(time.Hour * 24).Unix(),
 	})
 	tokenString, err := token.SignedString(secretKey)
 	if err != nil {
@@ -95,6 +138,14 @@ func createToken(username string) string {
 }
 
 func login(w http.ResponseWriter, r *http.Request) {
+
+	db, err := sql.Open("pgx", connStr)
+	if err != nil {
+		log.Fatalf("Unable to open database connection: %v\n", err)
+	}
+
+	defer db.Close()
+
 	if r.Method != http.MethodPost {
 		http.Error(w, "Login: ", http.StatusMethodNotAllowed)
 		return
@@ -103,13 +154,23 @@ func login(w http.ResponseWriter, r *http.Request) {
 	username := r.FormValue("username")
 	password := r.FormValue("password")
 
-	user, ok := users[username]
-	if !ok {
+	query := "SELECT hash_password FROM users WHERE username = $1"
+	rows, err := db.Query(query, username)
+	if err != nil {
+		http.Error(w, "Login: Error querying user", http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+
+	if !rows.Next() {
 		http.Error(w, "Login: User not found", http.StatusNotFound)
 		return
 	}
 
-	if !checkPassword(password, user.HashPassword) {
+	var hashedPassword string
+	rows.Scan(&hashedPassword)
+
+	if !checkPassword(password, hashedPassword) {
 		http.Error(w, "Login: Invalid password", http.StatusUnauthorized)
 		return
 	}
@@ -123,16 +184,10 @@ func login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-
 	w.Header().Set("Content-Type", "application/json")
 
 	w.WriteHeader(http.StatusOK)
 	w.Write(jsonResponse)
-
-
-
-	users[username] = user
-
 }
 
 func protected(w http.ResponseWriter, r *http.Request) {
@@ -161,7 +216,7 @@ func logout(w http.ResponseWriter, r *http.Request) {
 	tokenString := r.Header.Get("Authorization")
 	if tokenString == "" {
 		http.Error(w, "protected: ", http.StatusUnauthorized)
-		return		
+		return
 	}
 	tokenString = tokenString[len("Bearer "):]
 	if err := verifyToken(tokenString); err != nil {
@@ -169,27 +224,21 @@ func logout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	username := r.FormValue("username")
-	user, _ := users[username]
-	users[username] = user
-
 }
-
-var AuthError = errors.New("Unauthorized")
 
 func verifyToken(tokenString string) error {
 	token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
-	   return secretKey, nil
+		return secretKey, nil
 	})
-   
+
 	if err != nil {
-	   return err
+		return err
 	}
-   
+
 	if !token.Valid {
-	   return fmt.Errorf("invalid token")
+		return fmt.Errorf("invalid token")
 	}
-   
+
 	return nil
 }
 

@@ -7,6 +7,16 @@ services:
       - appnet
     depends_on:
       - db
+    env_file:
+      - .env
+    environment:
+      DB_HOST: db
+      DB_PORT: "5432"
+      DB_USER: ${POSTGRES_USER}
+      DB_PASSWORD: ${POSTGRES_PASSWORD}
+      DB_NAME: ${POSTGRES_DB}
+      APP_PORT: "8080"
+      SECRET_KEY: ${SECRET_KEY:-secret-key}
   db:
     image: postgres:latest
     env_file:

@@ -16,13 +16,18 @@ The Go service currently uses a simple JWT (HS256) and stores users in Postgres 
 
 
 ## Quick start
-1) Create the `.env` file at the project root for the Postgres container:
+1) Create the `.env` file at the project root for the Postgres container and app configuration:
 
 ```env
-# .env (used by docker-compose for the db container)
+# .env (used by docker-compose for db and app)
 POSTGRES_USER=user
 POSTGRES_PASSWORD=password
 POSTGRES_DB=mydb
+# App configuration
+# If omitted, defaults are used (SECRET_KEY defaults to "secret-key")
+SECRET_KEY=change-me
+# Optional: override app port inside container (default 8080)
+# APP_PORT=8080
 ```
 
 2) Start the infrastructure:
@@ -65,7 +70,23 @@ go run .
 
 The service will listen on `http://localhost:8080`.
 
-Note: There is also a Docker image for the app defined in `auth/Dockerfile` and wired in `docker-compose.yml`. However, the code currently uses a hardcoded DSN pointing to `localhost:5433`. That works best when running the app locally with the SSH tunnel. If you prefer running the app inside Docker, update the code to connect to `db:5432` or make the DSN configurable via environment variables.
+Note: The app now reads configuration from environment variables. When running in Docker, `docker-compose.yml` supplies:
+
+- `DB_HOST=db`, `DB_PORT=5432`, `DB_USER`, `DB_PASSWORD`, `DB_NAME` (derived from `POSTGRES_*`)
+- `APP_PORT=8080`
+- `SECRET_KEY` (from `.env`, defaults to `secret-key` if not provided)
+
+When running locally (outside Docker), defaults are used unless you set the following env vars:
+
+```bash
+export DB_HOST=localhost
+export DB_PORT=5433
+export DB_USER=user
+export DB_PASSWORD=password
+export DB_NAME=mydb
+export SECRET_KEY=change-me
+export APP_PORT=8080
+```
 
 
 ## Services (docker-compose.yml)
@@ -128,8 +149,8 @@ curl -X POST http://localhost:8080/logout \
 
 
 ## Notes and recommendations
-- The DB connection string is currently hardcoded in `auth/main.go` to `host=localhost port=5433 user=user password=password dbname=mydb sslmode=disable`. This aligns with the local SSH tunnel flow above.
-- For containerized app runtime, consider moving the DSN to environment variables and targeting `host=db port=5432` on the Docker network.
+- The DB connection string is now configurable via environment variables (`DB_HOST`, `DB_PORT`, `DB_USER`, `DB_PASSWORD`, `DB_NAME`). Defaults align with the local SSH tunnel flow above.
+- For containerized app runtime, the app targets `host=db port=5432` on the Docker network via compose-provided environment.
 - Metabase can connect directly to the `db` service on the Docker network and is useful for inspecting tables and running queries.
 
 
