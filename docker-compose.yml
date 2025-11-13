@@ -1,12 +1,14 @@
 services:
   app:
     build: ./auth
+    container_name: auth
     ports:
       - "8080:8080"
     networks:
       - appnet
     depends_on:
-      - db
+      db:
+        condition: service_healthy
     env_file:
       - .env
     environment:
@@ -19,12 +21,19 @@ services:
       SECRET_KEY: ${SECRET_KEY:-secret-key}
   db:
     image: postgres:latest
+    container_name: db
     env_file:
       - .env
     networks:
       - appnet
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "${POSTGRES_USER}"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
   metabase:
     image: metabase/metabase:latest
+    container_name: metabase
     ports:
       - "3000:3000"
     depends_on:
